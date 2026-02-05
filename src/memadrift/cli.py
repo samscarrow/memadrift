@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 
 from memadrift import __version__
+from memadrift.audit import write_entries
 from memadrift.fixer import FixAction, apply_fix
 from memadrift.ids import generate_id
 from memadrift.models import (
@@ -153,8 +154,11 @@ def _try_check(
 @click.option("--interactive", is_flag=True, help="Enable interactive user prompts for verification.")
 @click.option("--limit", type=int, default=0, help="Max items to check (0 = unlimited).")
 @click.option("--max-cost", type=float, default=0.0, help="Max total verification cost (0 = unlimited).")
+@click.option("--audit-log", default="audit.jsonl", type=click.Path(),
+              help="Path to JSON-lines audit log.")
+@click.option("--no-audit", is_flag=True, help="Disable audit log writing.")
 @click.pass_context
-def scan(ctx, dry_run, interactive, limit, max_cost):
+def scan(ctx, dry_run, interactive, limit, max_cost, audit_log, no_audit):
     """Scan memory items for drift and apply fixes."""
     memory_path = ctx.obj["memory_path"]
     schema_path = ctx.obj["schema_path"]
@@ -215,6 +219,9 @@ def scan(ctx, dry_run, interactive, limit, max_cost):
     if not dry_run and results:
         Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
         click.echo(f"Wrote {len(results)} update(s) to {memory_path}.")
+        if not no_audit:
+            count = write_entries(results, Path(audit_log), str(memory_path))
+            click.echo(f"Appended {count} entry/entries to {audit_log}.")
     elif dry_run:
         click.echo("Dry run — no changes written.")
     else:

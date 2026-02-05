@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 from datetime import date
@@ -400,3 +401,81 @@ class TestScanBudget:
         )
         assert result.exit_code == 0
         assert "Budget exhausted" in result.output
+
+
+class TestScanAudit:
+    def test_scan_writes_audit_log(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "nvim")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        audit_path = workspace / "audit.jsonl"
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--audit-log", str(audit_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert audit_path.exists()
+        entry = json.loads(audit_path.read_text().strip().split("\n")[0])
+        assert entry["key"] == "env.editor"
+        assert entry["action"] == "auto_updated"
+        assert entry["old_value"] == "vim"
+        assert entry["new_value"] == "nvim"
+        assert "Appended" in result.output
+
+    def test_scan_dry_run_no_audit(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "nvim")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        audit_path = workspace / "audit.jsonl"
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--dry-run", "--audit-log", str(audit_path)],
+        )
+        assert result.exit_code == 0
+        assert not audit_path.exists()
+
+    def test_scan_no_audit_flag(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "nvim")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        audit_path = workspace / "audit.jsonl"
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--no-audit", "--audit-log", str(audit_path)],
+        )
+        assert result.exit_code == 0
+        assert not audit_path.exists()
+
+    def test_scan_custom_audit_path(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "nvim")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        custom_path = workspace / "custom.jsonl"
+        default_path = workspace / "audit.jsonl"
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--audit-log", str(custom_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert custom_path.exists()
+        assert not default_path.exists()
