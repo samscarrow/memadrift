@@ -1,0 +1,49 @@
+keys:
+  env.editor:
+    type: env
+    sources:
+      - env_var:EDITOR
+    aliases:
+      - editor
+
+  editor.theme:
+    type: pref
+    sources: []
+    aliases:
+      - theme
+
+  user.name:
+    type: fact
+    sources:
+      - git_config:user.name
+    aliases:
+      - name
+
+  user.email:
+    type: fact
+    sources:
+      - git_config:user.email
+    aliases:
+      - email
+
+  env.shell:
+    type: env
+    sources:
+      - env_var:SHELL
+    aliases:
+      - shell
+
+  env.terminal:
+    type: env
+    sources:
+      - env_var:TERM
+    aliases:
+      - terminal
+
+  path.home:
+    type: env
+    sources:
+      - env_var:HOME
+      - path_exists:~
+    aliases:
+      - home

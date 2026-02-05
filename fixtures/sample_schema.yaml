@@ -1,0 +1,29 @@
+keys:
+  env.editor:
+    type: env
+    sources:
+      - env_var:EDITOR
+    aliases:
+      - editor
+
+  user.name:
+    type: fact
+    sources:
+      - git_config:user.name
+    aliases:
+      - name
+
+  env.shell:
+    type: env
+    sources:
+      - env_var:SHELL
+    aliases:
+      - shell
+
+  path.home:
+    type: env
+    sources:
+      - env_var:HOME
+      - path_exists:~
+    aliases:
+      - home
