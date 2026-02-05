@@ -18,9 +18,9 @@ from memadrift.models import (
     VerifyMode,
 )
 from memadrift.parser import MemoryFile, ParseError, Parser
-from memadrift.reality import LocalEnvSource
+from memadrift.reality import LocalEnvSource, UserSource, VerificationSource
 from memadrift.schema import Schema
-from memadrift.scorer import is_stale, rank
+from memadrift.scorer import VERIFY_COSTS, is_stale, rank
 
 DEFAULT_MEMORY = "MEMORY.md"
 DEFAULT_SCHEMA = "schema.yaml"
@@ -40,12 +40,18 @@ DEFAULT_SCHEMA = "schema.yaml"
     type=click.Path(),
     help="Path to schema file.",
 )
+@click.option(
+    "--no-backup",
+    is_flag=True,
+    help="Disable .bak backup before writing.",
+)
 @click.pass_context
-def cli(ctx, memory, schema):
+def cli(ctx, memory, schema, no_backup):
     """Drift detection and remediation for Claude memory files."""
     ctx.ensure_object(dict)
     ctx.obj["memory_path"] = Path(memory)
     ctx.obj["schema_path"] = Path(schema)
+    ctx.obj["no_backup"] = no_backup
 
 
 @cli.command()
@@ -67,7 +73,7 @@ def ids(ctx):
             changed += 1
 
     if changed:
-        Parser.write(mf, memory_path)
+        Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
         click.echo(f"Updated {changed} ID(s).")
     else:
         click.echo("All IDs are correct.")
@@ -133,10 +139,22 @@ def _report_errors(errors: list[str]) -> None:
     click.echo(f"{len(errors)} error(s) found.", err=True)
 
 
+def _try_check(
+    registry: list[VerificationSource], source_id: str, expected: str,
+):
+    for source in registry:
+        if source.can_check(source_id):
+            return source.check(source_id, expected)
+    return None
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing.")
+@click.option("--interactive", is_flag=True, help="Enable interactive user prompts for verification.")
+@click.option("--limit", type=int, default=0, help="Max items to check (0 = unlimited).")
+@click.option("--max-cost", type=float, default=0.0, help="Max total verification cost (0 = unlimited).")
 @click.pass_context
-def scan(ctx, dry_run):
+def scan(ctx, dry_run, interactive, limit, max_cost):
     """Scan memory items for drift and apply fixes."""
     memory_path = ctx.obj["memory_path"]
     schema_path = ctx.obj["schema_path"]
@@ -151,32 +169,51 @@ def scan(ctx, dry_run):
     if schema_path.exists():
         schema = Schema.load(schema_path)
 
-    env_source = LocalEnvSource()
+    source_registry: list[VerificationSource] = [LocalEnvSource()]
+    if interactive:
+        source_registry.append(UserSource())
+
     today = date.today()
     ranked = rank(mf.items, today=today)
 
     results = []
+    checked_count = 0
+    spent_cost = 0.0
+
     for item in ranked:
-        stale = is_stale(item, today=today)
+        if limit and checked_count >= limit:
+            click.echo(f"  Limit reached ({limit} items), stopping.")
+            break
+
+        item_cost = VERIFY_COSTS[item.verify_mode]
+        if max_cost > 0 and spent_cost + item_cost > max_cost:
+            click.echo(f"  Budget exhausted ({spent_cost:.1f}/{max_cost:.1f}), stopping.")
+            break
+
         sources = schema.sources_for(item.key) if schema else []
 
-        if not sources:
-            click.echo(f"  {item.key}: no sources configured, skipping")
-            continue
-
+        drift = None
         for source_id in sources:
-            if not env_source.can_check(source_id):
-                continue
-            drift = env_source.check(source_id, item.value)
+            drift = _try_check(source_registry, source_id, item.value)
+            if drift is not None:
+                break
+
+        # Implicit fallback for human-verified items when --interactive
+        if drift is None and interactive and item.verify_mode == VerifyMode.HUMAN:
+            drift = _try_check(source_registry, "user_confirm", item.value)
+
+        if drift is not None:
             fix_result = apply_fix(item, drift, today=today)
             results.append(fix_result)
-
+            checked_count += 1
+            spent_cost += item_cost
             action_label = fix_result.action.value.replace("_", " ")
             click.echo(f"  {item.key}: {action_label} — {fix_result.detail}")
-            break  # use first checkable source
+        else:
+            click.echo(f"  {item.key}: no checkable source, skipping")
 
     if not dry_run and results:
-        Parser.write(mf, memory_path)
+        Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
         click.echo(f"Wrote {len(results)} update(s) to {memory_path}.")
     elif dry_run:
         click.echo("Dry run — no changes written.")
@@ -233,5 +270,5 @@ def add(key, value, mem_type, scope_str, source, ttl_days, verify_mode, impact):
             raise SystemExit(1)
 
     mf.items.append(item)
-    Parser.write(mf, memory_path)
+    Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
     click.echo(f"Added {item_id} ({key} = {value})")

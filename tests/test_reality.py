@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 import pytest
 
@@ -50,6 +51,27 @@ class TestLocalEnvPath:
         source = LocalEnvSource()
         result = source.check("path_exists:/nonexistent/path/xyz", "/nonexistent/path/xyz")
         assert result.verdict == DriftVerdict.CONTRADICTION
+
+
+class TestGitConfigSafety:
+    def test_git_config_missing_git_binary(self, monkeypatch):
+        import shutil as _shutil
+
+        monkeypatch.setattr(_shutil, "which", lambda name: None)
+        source = LocalEnvSource()
+        result = source.check("git_config:user.name", "Sam")
+        assert result.verdict == DriftVerdict.UNVERIFIABLE
+        assert "git binary not found" in result.evidence
+
+    def test_git_config_timeout(self, monkeypatch):
+        def raise_timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+        monkeypatch.setattr(subprocess, "run", raise_timeout)
+        source = LocalEnvSource()
+        result = source.check("git_config:user.name", "Sam")
+        assert result.verdict == DriftVerdict.UNVERIFIABLE
+        assert "timed out" in result.evidence
 
 
 class TestLocalEnvCanCheck:

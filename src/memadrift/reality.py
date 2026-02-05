@@ -85,6 +85,13 @@ class LocalEnvSource(VerificationSource):
         )
 
     def _check_git_config(self, key: str, expected: str) -> DriftResult:
+        if shutil.which("git") is None:
+            return DriftResult(
+                verdict=DriftVerdict.UNVERIFIABLE,
+                expected=expected,
+                actual=None,
+                evidence="git binary not found in PATH",
+            )
         try:
             result = subprocess.run(
                 ["git", "config", "--global", key],
@@ -92,12 +99,12 @@ class LocalEnvSource(VerificationSource):
                 text=True,
                 timeout=5,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        except subprocess.TimeoutExpired:
             return DriftResult(
                 verdict=DriftVerdict.UNVERIFIABLE,
                 expected=expected,
                 actual=None,
-                evidence=f"Could not run git config --global {key}",
+                evidence=f"git config timed out",
             )
         if result.returncode != 0:
             return DriftResult(

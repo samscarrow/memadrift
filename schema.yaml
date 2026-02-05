@@ -8,7 +8,8 @@ keys:
 
   editor.theme:
     type: pref
-    sources: []
+    sources:
+      - user_confirm
     aliases:
       - theme
 
@@ -16,6 +17,7 @@ keys:
     type: fact
     sources:
       - git_config:user.name
+      - user_confirm
     aliases:
       - name
 

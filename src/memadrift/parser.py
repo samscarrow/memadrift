@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date
@@ -64,10 +65,13 @@ class Parser:
         return MemoryFile(frontmatter=frontmatter, items=items, path=path)
 
     @staticmethod
-    def write(mf: MemoryFile, path: Path | str | None = None) -> None:
+    def write(mf: MemoryFile, path: Path | str | None = None, *, backup: bool = True) -> None:
         path = Path(path) if path else mf.path
         if path is None:
             raise ValueError("No path specified for writing")
+
+        if backup and path.exists():
+            shutil.copy2(str(path), str(path.with_suffix(path.suffix + ".bak")))
 
         content = _render(mf)
 

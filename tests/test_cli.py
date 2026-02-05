@@ -194,6 +194,43 @@ class TestLint:
         assert "200 lines" in (result.output + str(result.exception or ""))
 
 
+class TestBackupCli:
+    def test_ids_creates_backup(self, runner, workspace):
+        mem_path = workspace / "MEMORY.md"
+        shutil.copy(FIXTURES / "sample_memory.md", mem_path)
+        original = mem_path.read_text()
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "ids"],
+        )
+        assert result.exit_code == 0
+        bak = workspace / "MEMORY.md.bak"
+        assert bak.exists()
+        assert bak.read_text() == original
+
+    def test_add_no_backup_for_new_file(self, runner, workspace):
+        mem_path = workspace / "NEW_MEMORY.md"
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim"],
+        )
+        assert result.exit_code == 0
+        assert not (workspace / "NEW_MEMORY.md.bak").exists()
+
+    def test_no_backup_flag(self, runner, workspace):
+        mem_path = workspace / "MEMORY.md"
+        shutil.copy(FIXTURES / "sample_memory.md", mem_path)
+        result = runner.invoke(
+            cli,
+            ["--no-backup", "--memory", str(mem_path),
+             "--schema", str(workspace / "schema.yaml"), "ids"],
+        )
+        assert result.exit_code == 0
+        assert not (workspace / "MEMORY.md.bak").exists()
+
+
 class TestScan:
     def test_scan_dry_run(self, runner, workspace, monkeypatch):
         monkeypatch.setenv("EDITOR", "vim")
@@ -226,3 +263,140 @@ class TestScan:
         )
         assert result.exit_code == 0
         assert "Wrote" in result.output or "already correct" in result.output.lower()
+
+    def test_scan_interactive_flag_accepted(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "vim")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--interactive", "--dry-run"],
+        )
+        assert result.exit_code == 0
+
+    def test_scan_non_interactive_skips_user_confirm(self, runner, workspace):
+        """Item with only user_confirm source is skipped without --interactive."""
+        schema_with_user = SCHEMA_CONTENT + """\
+  editor.theme:
+    type: pref
+    sources:
+      - user_confirm
+    aliases:
+      - theme
+"""
+        (workspace / "schema.yaml").write_text(schema_with_user)
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "editor.theme", "--value", "monokai",
+             "--type", "pref", "--verify-mode", "human"],
+        )
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--dry-run"],
+        )
+        assert result.exit_code == 0
+        assert "no checkable source" in result.output
+
+    def test_scan_interactive_human_verify_fallback(self, runner, workspace):
+        """verify_mode=human item with no user_confirm in schema gets implicit fallback when --interactive."""
+        mem_path = workspace / "MEMORY.md"
+        # user.name has git_config source only — no user_confirm in schema
+        # We use a schema without user_confirm for user.name
+        schema_no_user_confirm = """\
+keys:
+  user.name:
+    type: fact
+    sources:
+      - git_config:user.name
+    aliases:
+      - name
+"""
+        (workspace / "schema.yaml").write_text(schema_no_user_confirm)
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "user.name", "--value", "Sam",
+             "--type", "fact", "--verify-mode", "human", "--src", "user"],
+        )
+        # Feed "y" to the UserSource prompt to confirm
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--interactive", "--dry-run"],
+            input="y\n",
+        )
+        assert result.exit_code == 0
+        # Should have checked via user_confirm fallback, not "no checkable source"
+        assert "no checkable source" not in result.output
+
+
+class TestScanBudget:
+    def test_scan_limit(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "vim")
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.shell", "--value", "/bin/bash", "--src", "tool"],
+        )
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--limit", "1", "--dry-run"],
+        )
+        assert result.exit_code == 0
+        assert "Limit reached" in result.output
+
+    def test_scan_max_cost(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "vim")
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.shell", "--value", "/bin/bash", "--src", "tool"],
+        )
+        # AUTO costs 0.1 each, so budget of 0.1 allows 1 item then stops
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--max-cost", "0.1", "--dry-run"],
+        )
+        assert result.exit_code == 0
+        assert "Budget exhausted" in result.output
+
+    def test_scan_budget_message(self, runner, workspace, monkeypatch):
+        monkeypatch.setenv("EDITOR", "vim")
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim", "--src", "tool"],
+        )
+        # Budget of 0.05 is below AUTO cost (0.1), so stops immediately
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "scan", "--max-cost", "0.05", "--dry-run"],
+        )
+        assert result.exit_code == 0
+        assert "Budget exhausted" in result.output

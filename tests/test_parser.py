@@ -197,6 +197,41 @@ class TestValuesWithSpaces:
         assert mf.items[0].value == "Sam Scarrow"
 
 
+class TestBackup:
+    def test_write_creates_backup(self, tmp_path):
+        item = _make_item()
+        mf = MemoryFile(frontmatter={"version": 1}, items=[item])
+        path = tmp_path / "MEMORY.md"
+        Parser.write(mf, path)
+        original = path.read_text()
+
+        # Write again with a changed item
+        mf.items[0] = _make_item(value="emacs")
+        Parser.write(mf, path)
+
+        bak = tmp_path / "MEMORY.md.bak"
+        assert bak.exists()
+        assert bak.read_text() == original
+
+    def test_write_no_backup_flag(self, tmp_path):
+        item = _make_item()
+        mf = MemoryFile(frontmatter={}, items=[item])
+        path = tmp_path / "MEMORY.md"
+        Parser.write(mf, path)
+        Parser.write(mf, path, backup=False)
+
+        bak = tmp_path / "MEMORY.md.bak"
+        assert not bak.exists()
+
+    def test_write_backup_new_file_no_crash(self, tmp_path):
+        item = _make_item()
+        mf = MemoryFile(frontmatter={}, items=[item])
+        path = tmp_path / "NEW.md"
+        Parser.write(mf, path)  # backup=True but file doesn't exist yet — no error
+        assert path.exists()
+        assert not (tmp_path / "NEW.md.bak").exists()
+
+
 class TestAtomicWrite:
     def test_no_temp_file_on_success(self, tmp_path):
         item = _make_item()
