@@ -86,6 +86,39 @@ class TestMemoryItem:
         assert item.key == "env.editor"
         assert item.value == "vim"
 
+    def test_ref_default_none(self):
+        item = MemoryItem(
+            id="mem_ABCDEFGH",
+            type=MemoryType.ENV,
+            scope=Scope.parse("global"),
+            key="env.editor",
+            value="vim",
+            src=Source.TOOL,
+            status=Status.ACTIVE,
+            last_verified=date(2025, 1, 15),
+            ttl_days=30,
+            verify_mode=VerifyMode.AUTO,
+            impact=Impact.LOW,
+        )
+        assert item.ref is None
+
+    def test_ref_explicit_value(self):
+        item = MemoryItem(
+            id="mem_ABCDEFGH",
+            type=MemoryType.ENV,
+            scope=Scope.parse("global"),
+            key="env.editor",
+            value="vim",
+            src=Source.TOOL,
+            status=Status.ACTIVE,
+            last_verified=date(2025, 1, 15),
+            ttl_days=30,
+            verify_mode=VerifyMode.AUTO,
+            impact=Impact.LOW,
+            ref="archive.md#mem_ABCDEFGH",
+        )
+        assert item.ref == "archive.md#mem_ABCDEFGH"
+
     def test_last_verified_never(self):
         item = MemoryItem(
             id="mem_ABCDEFGH",

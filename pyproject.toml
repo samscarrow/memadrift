@@ -1,6 +1,6 @@
 [project]
 name = "memadrift"
-version = "0.1.0"
+version = "0.2.0"
 description = "Drift detection and remediation for Claude memory files"
 readme = "README.md"
 authors = [

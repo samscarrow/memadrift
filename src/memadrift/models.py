@@ -69,3 +69,4 @@ class MemoryItem:
     ttl_days: int
     verify_mode: VerifyMode
     impact: Impact
+    ref: str | None = None

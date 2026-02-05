@@ -18,13 +18,14 @@ from memadrift.models import (
     Status,
     VerifyMode,
 )
-from memadrift.parser import MemoryFile, ParseError, Parser
+from memadrift.parser import MemoryFile, MemoryStore, ParseError, Parser
 from memadrift.reality import LocalEnvSource, UserSource, VerificationSource
 from memadrift.schema import Schema
 from memadrift.scorer import VERIFY_COSTS, is_stale, rank
 
 DEFAULT_MEMORY = "MEMORY.md"
 DEFAULT_SCHEMA = "schema.yaml"
+DEFAULT_PENDING = "pending_verifications.json"
 
 
 @click.group()
@@ -46,38 +47,67 @@ DEFAULT_SCHEMA = "schema.yaml"
     is_flag=True,
     help="Disable .bak backup before writing.",
 )
+@click.option(
+    "--network",
+    is_flag=True,
+    help="Enable network-based verification sources.",
+)
+@click.option(
+    "--env-file",
+    default=None,
+    type=click.Path(),
+    help="Path to .env file for secrets.",
+)
 @click.pass_context
-def cli(ctx, memory, schema, no_backup):
+def cli(ctx, memory, schema, no_backup, network, env_file):
     """Drift detection and remediation for Claude memory files."""
     ctx.ensure_object(dict)
     ctx.obj["memory_path"] = Path(memory)
     ctx.obj["schema_path"] = Path(schema)
     ctx.obj["no_backup"] = no_backup
+    ctx.obj["network"] = network
+    ctx.obj["env_file"] = env_file
 
 
 @cli.command()
+@click.option("--deep", is_flag=True, help="Normalize IDs across all included files.")
 @click.pass_context
-def ids(ctx):
+def ids(ctx, deep):
     """Assign/normalize deterministic IDs and rewrite the memory file."""
     memory_path = ctx.obj["memory_path"]
     if not memory_path.exists():
         click.echo(f"Memory file not found: {memory_path}", err=True)
         raise SystemExit(1)
 
-    mf = Parser.read(memory_path)
-    changed = 0
-    for item in mf.items:
-        correct_id = generate_id(item.type.value, str(item.scope), item.key)
-        if item.id != correct_id:
-            click.echo(f"  {item.id} -> {correct_id}  ({item.key})")
-            item.id = correct_id
-            changed += 1
-
-    if changed:
-        Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
-        click.echo(f"Updated {changed} ID(s).")
+    if deep:
+        store = Parser.read_store(memory_path)
+        changed = 0
+        for item in store.all_items:
+            correct_id = generate_id(item.type.value, str(item.scope), item.key)
+            if item.id != correct_id:
+                click.echo(f"  {item.id} -> {correct_id}  ({item.key})")
+                item.id = correct_id
+                changed += 1
+        if changed:
+            Parser.write_store(store, backup=not ctx.obj["no_backup"])
+            click.echo(f"Updated {changed} ID(s) across all files.")
+        else:
+            click.echo("All IDs are correct.")
     else:
-        click.echo("All IDs are correct.")
+        mf = Parser.read(memory_path)
+        changed = 0
+        for item in mf.items:
+            correct_id = generate_id(item.type.value, str(item.scope), item.key)
+            if item.id != correct_id:
+                click.echo(f"  {item.id} -> {correct_id}  ({item.key})")
+                item.id = correct_id
+                changed += 1
+
+        if changed:
+            Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
+            click.echo(f"Updated {changed} ID(s).")
+        else:
+            click.echo("All IDs are correct.")
 
 
 @cli.command()
@@ -127,6 +157,16 @@ def lint(ctx):
             if resolved is None:
                 errors.append(f"Unknown key: {item.key} (not in schema)")
 
+    # Validate refs (Step 6)
+    from memadrift.validators import validate_ref
+
+    base_dir = memory_path.parent
+    for item in mf.items:
+        if item.ref is not None:
+            ref_errors = validate_ref(item.ref, base_dir)
+            for err in ref_errors:
+                errors.append(f"{item.key}: {err}")
+
     if errors:
         _report_errors(errors)
         raise SystemExit(1)
@@ -149,6 +189,28 @@ def _try_check(
     return None
 
 
+def _build_source_registry(ctx, interactive: bool) -> list[VerificationSource]:
+    """Build the verification source registry based on flags."""
+    registry: list[VerificationSource] = [LocalEnvSource()]
+
+    if ctx.obj.get("network"):
+        from memadrift.external import ExternalSource, GitHubSource
+        from memadrift.secrets import load_env
+
+        env_file = ctx.obj.get("env_file")
+        if env_file:
+            load_env(env_file)
+        else:
+            load_env(".env")
+        registry.append(ExternalSource())
+        registry.append(GitHubSource())
+
+    if interactive:
+        registry.append(UserSource())
+
+    return registry
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing.")
 @click.option("--interactive", is_flag=True, help="Enable interactive user prompts for verification.")
@@ -157,8 +219,11 @@ def _try_check(
 @click.option("--audit-log", default="audit.jsonl", type=click.Path(),
               help="Path to JSON-lines audit log.")
 @click.option("--no-audit", is_flag=True, help="Disable audit log writing.")
+@click.option("--deep", is_flag=True, help="Scan all included files.")
+@click.option("--pending-queue", default=None, type=click.Path(),
+              help="Path to pending verification queue.")
 @click.pass_context
-def scan(ctx, dry_run, interactive, limit, max_cost, audit_log, no_audit):
+def scan(ctx, dry_run, interactive, limit, max_cost, audit_log, no_audit, deep, pending_queue):
     """Scan memory items for drift and apply fixes."""
     memory_path = ctx.obj["memory_path"]
     schema_path = ctx.obj["schema_path"]
@@ -167,18 +232,22 @@ def scan(ctx, dry_run, interactive, limit, max_cost, audit_log, no_audit):
         click.echo(f"Memory file not found: {memory_path}", err=True)
         raise SystemExit(1)
 
-    mf = Parser.read(memory_path)
+    if deep:
+        store = Parser.read_store(memory_path)
+        items = store.all_items
+    else:
+        store = None
+        mf = Parser.read(memory_path)
+        items = mf.items
 
     schema = None
     if schema_path.exists():
         schema = Schema.load(schema_path)
 
-    source_registry: list[VerificationSource] = [LocalEnvSource()]
-    if interactive:
-        source_registry.append(UserSource())
+    source_registry = _build_source_registry(ctx, interactive)
 
     today = date.today()
-    ranked = rank(mf.items, today=today)
+    ranked = rank(items, today=today)
 
     results = []
     checked_count = 0
@@ -214,10 +283,27 @@ def scan(ctx, dry_run, interactive, limit, max_cost, audit_log, no_audit):
             action_label = fix_result.action.value.replace("_", " ")
             click.echo(f"  {item.key}: {action_label} — {fix_result.detail}")
         else:
-            click.echo(f"  {item.key}: no checkable source, skipping")
+            if pending_queue:
+                from memadrift.pending import add_to_queue
+
+                add_to_queue(
+                    item_id=item.id,
+                    key=item.key,
+                    current_value=item.value,
+                    verify_mode=item.verify_mode.value,
+                    source_file=str(memory_path),
+                    evidence="no checkable source",
+                    path=pending_queue,
+                )
+                click.echo(f"  {item.key}: queued for pending verification")
+            else:
+                click.echo(f"  {item.key}: no checkable source, skipping")
 
     if not dry_run and results:
-        Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
+        if deep and store:
+            Parser.write_store(store, backup=not ctx.obj["no_backup"])
+        else:
+            Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
         click.echo(f"Wrote {len(results)} update(s) to {memory_path}.")
         if not no_audit:
             count = write_entries(results, Path(audit_log), str(memory_path))
@@ -226,6 +312,129 @@ def scan(ctx, dry_run, interactive, limit, max_cost, audit_log, no_audit):
         click.echo("Dry run — no changes written.")
     else:
         click.echo("No items to check.")
+
+
+def _is_cold(item: MemoryItem, today: date) -> bool:
+    """Check if an item is cold (eligible for archival)."""
+    if item.impact != Impact.LOW or item.type != MemoryType.FACT:
+        return False
+    if isinstance(item.last_verified, str):
+        return False  # last_verified == "never"
+    age = (today - item.last_verified).days
+    return age > 180
+
+
+@cli.command()
+@click.option("--archive", default="archive.md", help="Path to archive file (relative to memory dir).")
+@click.option("--dry-run", is_flag=True, help="Show cold items without moving.")
+@click.pass_context
+def optimize(ctx, archive, dry_run):
+    """Move cold items from MEMORY.md to an archive file."""
+    memory_path = ctx.obj["memory_path"]
+
+    if not memory_path.exists():
+        click.echo(f"Memory file not found: {memory_path}", err=True)
+        raise SystemExit(1)
+
+    mf = Parser.read(memory_path)
+    today = date.today()
+    base_dir = memory_path.parent
+
+    cold_items = [item for item in mf.items if _is_cold(item, today)]
+
+    if not cold_items:
+        click.echo("No cold items found.")
+        return
+
+    if dry_run:
+        click.echo("Cold items (would be archived):")
+        for item in cold_items:
+            click.echo(f"  {item.key} (last verified: {item.last_verified})")
+        return
+
+    # Load or create archive
+    archive_path = base_dir / archive
+    if archive_path.exists():
+        archive_mf = Parser.read(archive_path)
+    else:
+        archive_mf = MemoryFile(
+            frontmatter={"version": 1, "role": "archive"},
+            items=[],
+            path=archive_path,
+        )
+
+    # Move cold items to archive
+    for item in cold_items:
+        archive_mf.items.append(item)
+        mf.items.remove(item)
+        click.echo(f"  Archived: {item.key}")
+
+    # Ensure includes has archive
+    includes = mf.frontmatter.get("includes", []) or []
+    if archive not in includes:
+        includes.append(archive)
+        mf.frontmatter["includes"] = includes
+
+    backup = not ctx.obj["no_backup"]
+    Parser.write(archive_mf, archive_path, backup=backup)
+    Parser.write(mf, memory_path, backup=backup)
+    click.echo(f"Moved {len(cold_items)} item(s) to {archive}.")
+
+
+@cli.command("verify-pending")
+@click.option("--queue", "queue_path", default=DEFAULT_PENDING, type=click.Path(),
+              help="Path to pending verification queue.")
+@click.pass_context
+def verify_pending(ctx, queue_path):
+    """Interactively verify items from the pending queue."""
+    from memadrift.pending import read_queue, remove_from_queue
+
+    memory_path = ctx.obj["memory_path"]
+
+    entries = read_queue(queue_path)
+    if not entries:
+        click.echo("No pending verifications.")
+        return
+
+    if not memory_path.exists():
+        click.echo(f"Memory file not found: {memory_path}", err=True)
+        raise SystemExit(1)
+
+    mf = Parser.read(memory_path)
+    user_source = UserSource()
+    today = date.today()
+    resolved_count = 0
+
+    for entry in list(entries):
+        item_id = entry["item_id"]
+        key = entry["key"]
+        current_value = entry["current_value"]
+
+        # Find item in memory file
+        item = None
+        for it in mf.items:
+            if it.id == item_id:
+                item = it
+                break
+
+        if item is None:
+            click.echo(f"  {key}: item {item_id} not found in memory file, removing from queue")
+            remove_from_queue(item_id, queue_path)
+            continue
+
+        click.echo(f"  Verifying: {key} = {current_value}")
+        drift = user_source.check("user_confirm", current_value)
+        fix_result = apply_fix(item, drift, today=today)
+        action_label = fix_result.action.value.replace("_", " ")
+        click.echo(f"    {action_label} — {fix_result.detail}")
+        remove_from_queue(item_id, queue_path)
+        resolved_count += 1
+
+    if resolved_count:
+        Parser.write(mf, memory_path, backup=not ctx.obj["no_backup"])
+        click.echo(f"Resolved {resolved_count} pending item(s).")
+    else:
+        click.echo("No items resolved.")
 
 
 @cli.command()

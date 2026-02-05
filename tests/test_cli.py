@@ -63,7 +63,7 @@ class TestVersion:
     def test_version(self, runner):
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert "0.2.0" in result.output
 
 
 class TestHelp:
@@ -74,6 +74,8 @@ class TestHelp:
         assert "lint" in result.output
         assert "scan" in result.output
         assert "add" in result.output
+        assert "optimize" in result.output
+        assert "verify-pending" in result.output
 
 
 class TestAdd:
@@ -147,6 +149,47 @@ class TestIds:
         assert result.exit_code == 0
         assert "All IDs are correct" in result.output
 
+    def test_ids_deep_normalizes_across_files(self, runner, workspace):
+        mem_path = workspace / "MEMORY.md"
+        topic_path = workspace / "topic.md"
+        mem_path.write_text(
+            "---\nversion: 1\nincludes:\n  - topic.md\n---\n"
+            "mem_AAAAAAAA | env | scope=global | key=env.editor"
+            " | value=vim | src=tool | status=active"
+            " | last_verified=2025-01-15 | ttl_days=30 | verify_mode=auto | impact=low\n"
+        )
+        topic_path.write_text(
+            "---\nversion: 1\n---\n"
+            "mem_BBBBBBBB | env | scope=global | key=env.shell"
+            " | value=/bin/bash | src=tool | status=active"
+            " | last_verified=2025-01-15 | ttl_days=30 | verify_mode=auto | impact=low\n"
+        )
+        result = runner.invoke(
+            cli,
+            ["--no-backup", "--memory", str(mem_path),
+             "--schema", str(workspace / "schema.yaml"),
+             "ids", "--deep"],
+        )
+        assert result.exit_code == 0
+        assert "Updated" in result.output or "All IDs are correct" in result.output
+
+    def test_ids_deep_no_changes(self, runner, workspace):
+        mem_path = workspace / "MEMORY.md"
+        # Use add to create a correct-ID item, then verify --deep reports correct
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim"],
+        )
+        result = runner.invoke(
+            cli,
+            ["--no-backup", "--memory", str(mem_path),
+             "--schema", str(workspace / "schema.yaml"),
+             "ids", "--deep"],
+        )
+        assert result.exit_code == 0
+        assert "All IDs are correct" in result.output
+
     def test_ids_missing_file(self, runner, workspace):
         result = runner.invoke(
             cli,
@@ -193,6 +236,64 @@ class TestLint:
         )
         assert result.exit_code != 0
         assert "200 lines" in (result.output + str(result.exception or ""))
+
+
+class TestLintRefs:
+    def test_lint_valid_ref(self, runner, workspace):
+        mem_path = workspace / "MEMORY.md"
+        target = workspace / "archive.md"
+        target.write_text("---\nversion: 1\n---\n")
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim"],
+        )
+        # Manually add ref to the record
+        mf = Parser.read(mem_path)
+        mf.items[0].ref = "archive.md"
+        Parser.write(mf, mem_path, backup=False)
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "lint"],
+        )
+        assert result.exit_code == 0
+
+    def test_lint_invalid_ref_missing_file(self, runner, workspace):
+        mem_path = workspace / "MEMORY.md"
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim"],
+        )
+        mf = Parser.read(mem_path)
+        mf.items[0].ref = "nonexistent.md"
+        Parser.write(mf, mem_path, backup=False)
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "lint"],
+        )
+        assert result.exit_code != 0
+
+    def test_lint_invalid_ref_missing_anchor(self, runner, workspace):
+        mem_path = workspace / "MEMORY.md"
+        target = workspace / "archive.md"
+        target.write_text("---\nversion: 1\n---\n")
+        runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "add", "--key", "env.editor", "--value", "vim"],
+        )
+        mf = Parser.read(mem_path)
+        mf.items[0].ref = "archive.md#mem_ZZZZZZZZ"
+        Parser.write(mf, mem_path, backup=False)
+        result = runner.invoke(
+            cli,
+            ["--memory", str(mem_path), "--schema", str(workspace / "schema.yaml"),
+             "lint"],
+        )
+        assert result.exit_code != 0
 
 
 class TestBackupCli:

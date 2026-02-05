@@ -49,3 +49,17 @@ keys:
       - path_exists:~
     aliases:
       - home
+
+  repo.visibility:
+    type: fact
+    sources:
+      - github_visibility:samscarrow/memadrift
+    aliases:
+      - visibility
+
+  repo.default_branch:
+    type: fact
+    sources:
+      - github_branch:samscarrow/memadrift
+    aliases:
+      - default_branch

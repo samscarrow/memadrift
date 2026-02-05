@@ -24,8 +24,34 @@ RECORD_RE = re.compile(
     r"^(mem_[A-Z2-7]{8})\s*\|\s*(\w+)\s*\|\s*scope=(\S+)\s*\|\s*key=(\S+)"
     r"\s*\|\s*value=(.+?)\s*\|\s*src=(\w+)\s*\|\s*status=(\w+)"
     r"\s*\|\s*last_verified=(\S+)\s*\|\s*ttl_days=(\d+)"
-    r"\s*\|\s*verify_mode=(\w+)\s*\|\s*impact=(\w+)\s*$"
+    r"\s*\|\s*verify_mode=(\w+)\s*\|\s*impact=(\w+)"
+    r"(?:\s*\|\s*ref=(\S+))?\s*$"
 )
+
+
+@dataclass
+class MemoryStore:
+    index: MemoryFile
+    topics: dict[str, MemoryFile] = field(default_factory=dict)
+
+    @property
+    def base_dir(self) -> Path:
+        if self.index.path is None:
+            raise ValueError("Index file has no path")
+        return self.index.path.parent
+
+    @property
+    def all_items(self) -> list[MemoryItem]:
+        items = list(self.index.items)
+        for mf in self.topics.values():
+            items.extend(mf.items)
+        return items
+
+    @property
+    def all_files(self) -> list[MemoryFile]:
+        result = list(self.topics.values())
+        result.append(self.index)
+        return result
 
 
 class ParseError(Exception):
@@ -63,6 +89,30 @@ class Parser:
         frontmatter, body = _split_frontmatter(text)
         items = _parse_body(body)
         return MemoryFile(frontmatter=frontmatter, items=items, path=path)
+
+    @staticmethod
+    def read_store(index_path: Path | str) -> MemoryStore:
+        index_path = Path(index_path)
+        index = Parser.read(index_path)
+        base_dir = index_path.parent
+        includes = index.frontmatter.get("includes", []) or []
+        topics: dict[str, MemoryFile] = {}
+        for rel_path in includes:
+            if Path(rel_path).is_absolute():
+                raise ParseError(f"Absolute path in includes: {rel_path}")
+            topic_path = base_dir / rel_path
+            if not topic_path.exists():
+                raise ParseError(f"Included file not found: {rel_path}")
+            topics[rel_path] = Parser.read(topic_path)
+        return MemoryStore(index=index, topics=topics)
+
+    @staticmethod
+    def write_store(store: MemoryStore, *, backup: bool = True) -> None:
+        # Write topics first, then index
+        for rel_path, mf in store.topics.items():
+            path = store.base_dir / rel_path
+            Parser.write(mf, path, backup=backup)
+        Parser.write(store.index, backup=backup)
 
     @staticmethod
     def write(mf: MemoryFile, path: Path | str | None = None, *, backup: bool = True) -> None:
@@ -138,6 +188,7 @@ def _match_to_item(m: re.Match, lineno: int) -> MemoryItem:
             ttl_days=int(m.group(9)),
             verify_mode=VerifyMode(m.group(10)),
             impact=Impact(m.group(11)),
+            ref=m.group(12),
         )
     except (ValueError, KeyError) as e:
         raise ParseError(str(e), line_number=lineno) from e
@@ -162,10 +213,13 @@ def _render(mf: MemoryFile) -> str:
 
 
 def _render_item(item: MemoryItem) -> str:
-    return (
+    line = (
         f"{item.id} | {item.type.value} | scope={item.scope} | key={item.key}"
         f" | value={item.value} | src={item.src.value} | status={item.status.value}"
         f" | last_verified={_format_last_verified(item.last_verified)}"
         f" | ttl_days={item.ttl_days} | verify_mode={item.verify_mode.value}"
         f" | impact={item.impact.value}"
     )
+    if item.ref is not None:
+        line += f" | ref={item.ref}"
+    return line

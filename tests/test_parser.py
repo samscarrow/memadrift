@@ -197,6 +197,63 @@ class TestValuesWithSpaces:
         assert mf.items[0].value == "Sam Scarrow"
 
 
+class TestRefField:
+    def test_parse_record_with_ref(self, tmp_path):
+        record = (
+            "mem_ABCDEFGH | env | scope=global | key=env.editor"
+            " | value=vim | src=tool | status=active"
+            " | last_verified=2025-01-15 | ttl_days=30 | verify_mode=auto | impact=low"
+            " | ref=archive.md#mem_ABCDEFGH"
+        )
+        path = tmp_path / "test.md"
+        path.write_text(record + "\n")
+        mf = Parser.read(path)
+        assert len(mf.items) == 1
+        assert mf.items[0].ref == "archive.md#mem_ABCDEFGH"
+
+    def test_parse_record_without_ref(self, tmp_path):
+        record = (
+            "mem_ABCDEFGH | env | scope=global | key=env.editor"
+            " | value=vim | src=tool | status=active"
+            " | last_verified=2025-01-15 | ttl_days=30 | verify_mode=auto | impact=low"
+        )
+        path = tmp_path / "test.md"
+        path.write_text(record + "\n")
+        mf = Parser.read(path)
+        assert len(mf.items) == 1
+        assert mf.items[0].ref is None
+
+    def test_roundtrip_with_ref(self, tmp_path):
+        item = _make_item(ref="patterns.md#mem_ABCDEFGH")
+        mf = MemoryFile(frontmatter={}, items=[item])
+        path = tmp_path / "test.md"
+        Parser.write(mf, path)
+        loaded = Parser.read(path)
+        assert loaded.items[0].ref == "patterns.md#mem_ABCDEFGH"
+
+    def test_roundtrip_without_ref(self, tmp_path):
+        item = _make_item()
+        mf = MemoryFile(frontmatter={}, items=[item])
+        path = tmp_path / "test.md"
+        Parser.write(mf, path)
+        loaded = Parser.read(path)
+        assert loaded.items[0].ref is None
+        content = path.read_text()
+        assert "ref=" not in content
+
+    def test_ref_with_anchor_fragment(self, tmp_path):
+        record = (
+            "mem_ABCDEFGH | env | scope=global | key=env.editor"
+            " | value=vim | src=tool | status=active"
+            " | last_verified=2025-01-15 | ttl_days=30 | verify_mode=auto | impact=low"
+            " | ref=topics/archive.md#env.editor"
+        )
+        path = tmp_path / "test.md"
+        path.write_text(record + "\n")
+        mf = Parser.read(path)
+        assert mf.items[0].ref == "topics/archive.md#env.editor"
+
+
 class TestBackup:
     def test_write_creates_backup(self, tmp_path):
         item = _make_item()
